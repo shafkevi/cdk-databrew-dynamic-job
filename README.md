@@ -1,6 +1,9 @@
-# Welcome to your CDK TypeScript project!
+# Welcome to Dynamic Databrew Job Project
 
-This is a blank project for TypeScript development with CDK.
+![Architecture](architecture.svg)
+
+![State Machine](StateMachine.png)
+
 
 The `cdk.json` file tells the CDK Toolkit how to execute your app.
 
