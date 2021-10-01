@@ -4,7 +4,7 @@ import * as cdk from '@aws-cdk/core';
 import { CdkDatabrewDynamicJobStack } from '../lib/cdk-databrew-dynamic-job-stack';
 
 const app = new cdk.App();
-new CdkDatabrewDynamicJobStack(app, 'CdkDatabrewDynamicJobStack', {
+new CdkDatabrewDynamicJobStack(app, 'CdkDatabrewDynamicJobStackSdkIntegration', {
   /* If you don't specify 'env', this stack will be environment-agnostic.
    * Account/Region-dependent features and context lookups will not work,
    * but a single synthesized template can be deployed anywhere. */

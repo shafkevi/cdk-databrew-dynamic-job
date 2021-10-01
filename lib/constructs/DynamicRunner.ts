@@ -1,10 +1,8 @@
 const path = require('path');
-import { CfnOutput, Construct } from "@aws-cdk/core";
+import { CfnOutput, Construct, Aws } from "@aws-cdk/core";
 import { PolicyStatement, Role, ServicePrincipal } from '@aws-cdk/aws-iam';
-import { Function, Runtime, Code } from '@aws-cdk/aws-lambda';
-import { GlueDataBrewStartJobRun, LambdaInvoke, } from "@aws-cdk/aws-stepfunctions-tasks";
-import { Aws } from "@aws-cdk/core";
-import { IntegrationPattern, JsonPath, StateMachine } from "@aws-cdk/aws-stepfunctions";
+import { GlueDataBrewStartJobRun } from "@aws-cdk/aws-stepfunctions-tasks";
+import { IntegrationPattern, JsonPath, StateMachine, CustomState, Chain } from "@aws-cdk/aws-stepfunctions";
 
 export interface DynamicRunnerProps { 
 
@@ -28,59 +26,122 @@ export default class DynamicRunner extends Construct {
       ]
     }));
 
-    const setupFunction = new Function(this, "SetupFunction", {
-      runtime: Runtime.NODEJS_14_X,
-      handler: "index.handler",
-      code: Code.fromAsset(path.join(__dirname, '../../src/setup')),
-      environment: {
-        "ROLE": dataBrewExecutionRole.roleArn
-      }
-    });
-    setupFunction.addToRolePolicy(new PolicyStatement({
-      actions: ['*'], 
-      resources: [`arn:aws:databrew:${Aws.REGION}:${Aws.ACCOUNT_ID}:*`]
-    }));
-    setupFunction.addToRolePolicy(new PolicyStatement({
-      actions: ['iam:PassRole'], 
-      resources: [dataBrewExecutionRole.roleArn]
-    }));
-    const setupTask = new LambdaInvoke(this, "SetupLambdaTask", {
-      lambdaFunction: setupFunction,
-      payloadResponseOnly: true,
-      resultPath: "$.setup",
-    });
-
-
-    const cleanupFunction = new Function(this, "CleanupFunction", {
-      runtime: Runtime.NODEJS_14_X,
-      handler: "index.handler",
-      code: Code.fromAsset(path.join(__dirname, '../../src/cleanup')),
-    });
-    cleanupFunction.addToRolePolicy(new PolicyStatement({
-      actions: ['*'], 
-      resources: [`arn:aws:databrew:${Aws.REGION}:${Aws.ACCOUNT_ID}:*`]
-    }));
-    const cleanupTask = new LambdaInvoke(this, "CleanupLambdaTask", {
-      lambdaFunction: cleanupFunction,
-      payloadResponseOnly: true,
-      resultPath: "$.cleanup",
+    const createDatasetJson = {
+      Type: "Task",
+      Parameters: {
+        "Input": {
+          "S3InputDefinition": {
+            "Bucket.$": "$.inputBucket",
+            "Key.$": "$.inputKey"
+          }
+        },
+        "FormatOptions": {
+          "Csv": {
+            "Delimiter": ",",
+            "HeaderRow": true
+          }
+        },
+        "Name.$": "States.Format('dataSet-{}',$.jobId)",
+        "Format.$": "$.format"
+      },
+      Resource: "arn:aws:states:::aws-sdk:databrew:createDataset",
+      ResultPath: "$.dataSet"
+    };
+    const createDatasetState = new CustomState(this, 'createDatasetState', {
+      stateJson: createDatasetJson,
     });
 
+
+    const createRecipeJobJson = {
+      "Type": "Task",
+      "Parameters": {
+        "Name.$": "States.Format('recipeJob-{}',$.jobId)",
+        "DatasetName.$": "States.Format('dataSet-{}',$.jobId)",
+        "RoleArn": dataBrewExecutionRole.roleArn,
+        "Outputs": [
+          {
+            "Location": {
+              "Bucket.$": "$.outputBucket",
+              "Key.$": "$.outputKey"
+            },
+            "Format.$": "$.format",
+            "FormatOptions": {
+              "Csv": {
+                "Delimiter": ","
+              }
+            },
+            "PartitionColumns": []
+          }
+        ],
+        "RecipeReference": {
+          "Name.$": "$.recipeName",
+          "RecipeVersion.$": "$.recipeVersion"
+        },
+        "LogSubscription": "ENABLE"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:databrew:createRecipeJob",
+      "ResultPath": "$.createRecipeJob"
+    }
+    const createRecipeJobState = new CustomState(this, 'createRecipeJobState', {
+      stateJson: createRecipeJobJson,
+    });
 
     const databrewTask = new GlueDataBrewStartJobRun(this, "DataBrewJob", {
       integrationPattern: IntegrationPattern.RUN_JOB,
-      name: JsonPath.stringAt("$.setup.recipeJobName"),
+      name: JsonPath.stringAt("$.createRecipeJob.Name"),
       resultPath: "$.execution",
     });
 
-    const definition = setupTask
-      .next(databrewTask)
-      .next(cleanupTask);
-
-    const stateMachine = new StateMachine(this, "StateMachine", {
-      definition,
+    const deleteJobJson = {
+      "Type": "Task",
+      "Parameters": {
+        "Name.$": "States.Format('recipeJob-{}',$.jobId)"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:databrew:deleteJob",
+      "ResultPath": "$.deleteJob"
+    }
+    const deleteJobState = new CustomState(this, 'deleteJobState', {
+      stateJson: deleteJobJson,
     });
 
+    const deleteDatasetJson = {
+      "Type": "Task",
+      "Parameters": {
+        "Name.$": "States.Format('dataSet-{}',$.jobId)"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:databrew:deleteDataset",
+      "ResultPath": "$.deleteDataSet"
+    }
+    const deleteDatasetState = new CustomState(this, 'deleteDatasetState', {
+      stateJson: deleteDatasetJson,
+    });
+
+
+    const stateChain = Chain.start(createDatasetState)
+      .next(createRecipeJobState)
+      .next(databrewTask)
+      .next(deleteJobState)
+      .next(deleteDatasetState);
+
+
+    const stateMachine = new StateMachine(this, "StateMachine", {
+      definition: stateChain,
+    });
+
+    stateMachine.addToRolePolicy(new PolicyStatement({
+      actions: ['iam:PassRole'], 
+      resources: [dataBrewExecutionRole.roleArn]
+    }));
+
+    stateMachine.addToRolePolicy(new PolicyStatement({
+      actions: [
+        'databrew:CreateDataset',
+        'databrew:CreateRecipeJob',
+        'databrew:DeleteJob',
+        'databrew:DeleteDataset'
+      ], 
+      resources: [`arn:aws:databrew:${Aws.REGION}:${Aws.ACCOUNT_ID}:*`]
+    }));
 
   }
 }
