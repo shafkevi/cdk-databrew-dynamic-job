@@ -5,7 +5,7 @@ In this version of the state machine, we leverage SDK calls as Tasks within Step
 
 Overall, this solution is much cleaner and potentially worth the cost due to the simplicity of it.
 
-![Architecture](architecture.svg)
+![Architecture](architecture.png)
 
 ![State Machine](StateMachine.png)
 
